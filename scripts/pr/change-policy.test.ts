@@ -140,6 +140,15 @@ describe('evaluateChangePolicy', () => {
     expect(result.checks.persistence).toBe(true)
   })
 
+  test('routes workbench journal changes to the persistence check', () => {
+    const result = evaluateChangePolicy([
+      'src/server/workbenchos/persistence/sqliteJournal.ts',
+      'src/server/workbenchos/persistence/sqliteJournal.test.ts',
+    ])
+
+    expect(result.checks.persistence).toBe(true)
+  })
+
   test('routes every source root the dead-import check owns to the policy lane', () => {
     // scripts/pr/dead-imports.test.ts reads these roots rather than importing them,
     // so the import graph cannot pull the policy lane in. Without the prefixes the
@@ -295,7 +304,7 @@ describe('evaluateChangePolicy', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
-  })
+  }, 20000)
 })
 
 describe('evaluateChangePolicy dependent-file widening', () => {

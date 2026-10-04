@@ -19,6 +19,12 @@
  */
 
 import { parseLauncherArgs, resolveSidecarInvocation } from './launcherRouting'
+import { runWorkerSupervisor } from '../../src/server/workbenchos/adapters/workerSupervisor'
+
+if (process.argv[2] === '--workbenchos-worker-supervisor') {
+  await runWorkerSupervisor()
+  process.exit(0)
+}
 
 // The compiled Computer Use runtime relaunches this executable directly. Its
 // isolated worker has no app-root and must not load preload, CLI configuration,

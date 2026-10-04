@@ -51,6 +51,16 @@ const checks: Check[] = [
     command: ['bun', 'run', 'test', '--', '--run', 'src/lib/persistenceMigrations.test.ts'],
     cwd: 'desktop',
   },
+  {
+    title: 'WorkbenchOS journal schema bootstrap and reopen',
+    command: [
+      'bun',
+      'test',
+      './src/server/workbenchos/persistence/sqliteJournal.test.ts',
+      '--test-name-pattern',
+      'schema version|reopens an existing v1',
+    ],
+  },
 ]
 
 async function runCheck(check: Check): Promise<number> {

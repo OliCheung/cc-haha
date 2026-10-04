@@ -26,6 +26,12 @@ import { ensureDesktopCliLauncherInstalled } from './services/desktopCliLauncher
 import { enableConfigs } from '../utils/config.js'
 import { diagnosticsService } from './services/diagnosticsService.js'
 import { ensurePersistentStorageUpgraded } from './services/persistentStorageMigrations.js'
+import {
+  getWorkbenchOSAgentFailure,
+  getWorkbenchOSCompositionFailure,
+  initializeWorkbenchOSRuntime,
+  shutdownWorkbenchOSRuntime,
+} from './workbenchosRuntime.js'
 import { handleStaticH5Request } from './staticH5.js'
 import {
   classifyH5Request,
@@ -263,6 +269,27 @@ export function startServer(port = PORT, host = HOST) {
   // background; without this, getPublicStatus() reports `off` and the sidebar
   // falls through to a full JSONL scan that can exceed the 120s client timeout.
   void localIndexCoordinator.start().catch(() => undefined)
+
+  // WorkbenchOS production composition (M5-PRE-004 Phase A). Resolves the
+  // journal path through the existing application-state resolver + managed
+  // database path helper and constructs the journal + browser automation port.
+  // Construction is side-effect free (the database is opened on first use), and
+  // a failure is recorded explicitly — never resolved by falling back to a
+  // repo-local/temporary path or by substituting a different store or port.
+  const workbenchOS = initializeWorkbenchOSRuntime()
+  if (workbenchOS === null) {
+    const failure = getWorkbenchOSCompositionFailure()
+    console.error(
+      `[workbenchos] composition unavailable: ${failure?.code ?? 'UNKNOWN'}${failure?.message ? ` (${failure.message})` : ''}`,
+    )
+  } else if (workbenchOS.agentFailure !== null) {
+    // The journal and the browser seam are composed; only the agent capability is
+    // absent. Recorded explicitly, never silently replaced (M5-PRE-006 §9/§22).
+    const failure = getWorkbenchOSAgentFailure()
+    console.error(
+      `[workbenchos] agent composition unavailable: ${failure?.code ?? 'UNKNOWN'}${failure?.message ? ` (${failure.message})` : ''}`,
+    )
+  }
 
   try {
     server = Bun.serve<WebSocketData>({
@@ -664,6 +691,7 @@ export async function stopServerRuntimeForShutdown(
     localIndexCoordinator.stop(),
     searchContentCoordinator.stop(),
     pendingIndexStartup,
+    shutdownWorkbenchOSRuntime(),
   ])
 
   const active = conversationService.getActiveSessions()

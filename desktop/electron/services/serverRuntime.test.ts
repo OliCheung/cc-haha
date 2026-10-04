@@ -9,6 +9,7 @@ import type { SidecarChild, SidecarPlan } from './sidecarManager'
 import { ADAPTER_FLAGS, SYSTEM_PROXY_ERROR_ENV } from './sidecarManager'
 import { ElectronServerRuntime } from './serverRuntime'
 import type { SystemProxyBridgeLike } from './systemProxyBridge'
+import type { BrowserSeamServer } from '../chatgptBrowser/seamServer'
 
 const sidecarMocks = {
   nextPort: 49321,
@@ -53,6 +54,7 @@ function createRuntime(options: {
   resolveSystemProxy?: (url: string) => Promise<string>
   sleep?: (delayMs: number) => Promise<void>
   proxyBridge?: SystemProxyBridgeLike
+  createBrowserSeamServer?: (credential: string) => Promise<BrowserSeamServer>
 } = {}) {
   return new ElectronServerRuntime({
     desktopRoot: '/isolated/desktop',
@@ -69,6 +71,12 @@ function createRuntime(options: {
       spawnSidecar: sidecarMocks.spawnSidecar,
       waitForServer: async () => await sidecarMocks.waitForServerImpl(),
       writeLastServerPort: () => undefined,
+      createBrowserSeamServer: options.createBrowserSeamServer ?? (async () => ({
+        url: 'http://127.0.0.1:49124/internal/browser-automation',
+        host: '127.0.0.1',
+        port: 49124,
+        close: async () => undefined,
+      })),
       ...(options.proxyBridge
         ? { createSystemProxyBridge: () => options.proxyBridge! }
         : {}),
@@ -151,6 +159,28 @@ describe('ElectronServerRuntime', () => {
     expect(sidecarMocks.serverPlans[0]!.env.CLAUDE_CONFIG_DIR).toBe(isolatedConfigDir)
     expect(sidecarMocks.serverPlans[0]!.env.CLAUDE_CONFIG_DIR)
       .not.toBe(path.join(homedir(), '.claude'))
+  })
+
+  it('removes inherited browser-seam credentials when the Electron listener cannot start', async () => {
+    const runtime = createRuntime({
+      env: {
+        CC_HAHA_BROWSER_SEAM_URL: 'http://example.com/internal/browser-automation',
+        CC_HAHA_BROWSER_SEAM_TOKEN: 'inherited-secret',
+      },
+      createBrowserSeamServer: async () => {
+        throw new Error('listener startup failed')
+      },
+    })
+
+    await runtime.startServer()
+
+    const serverEnv = sidecarMocks.serverPlans[0]!.env
+    expect(serverEnv.CC_HAHA_BROWSER_SEAM_URL).toBeUndefined()
+    expect(serverEnv.CC_HAHA_BROWSER_SEAM_TOKEN).toBeUndefined()
+    expect(sidecarMocks.appendHostDiagnostic).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.stringContaining('[browser-seam] [startup-error] listener startup failed'),
+    )
   })
 
   it('keeps the pet capability independent and exposes it only to the server sidecar', async () => {

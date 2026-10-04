@@ -150,6 +150,7 @@ const persistencePrefixes = [
   'src/server/__tests__/desktop-ui-preferences',
   'desktop/src/lib/persistenceMigrations',
   'scripts/quality-gate/persistence-upgrade',
+  'src/server/workbenchos/persistence',
 ]
 
 const policyPrefixes = [

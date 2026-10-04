@@ -30,6 +30,12 @@ import {
   SystemProxyBridge,
   type SystemProxyBridgeLike,
 } from './systemProxyBridge'
+import {
+  BROWSER_SEAM_CREDENTIAL_ENV,
+  BROWSER_SEAM_URL_ENV,
+  createChatGptBrowserSeamServer,
+  type BrowserSeamServer,
+} from '../chatgptBrowser/seamServer'
 
 type ServerRuntimeOptions = {
   onServerUnavailable?: () => void
@@ -53,6 +59,7 @@ type ServerRuntimeDeps = {
   waitForServer: typeof waitForServer
   writeLastServerPort: typeof writeLastServerPort
   createSystemProxyBridge: (resolveSystemProxy: (url: string) => Promise<string>) => SystemProxyBridgeLike
+  createBrowserSeamServer: (credential: string) => Promise<BrowserSeamServer>
 }
 
 const DEFAULT_SERVER_RUNTIME_DEPS: ServerRuntimeDeps = {
@@ -65,6 +72,7 @@ const DEFAULT_SERVER_RUNTIME_DEPS: ServerRuntimeDeps = {
   waitForServer,
   writeLastServerPort,
   createSystemProxyBridge: resolveSystemProxy => new SystemProxyBridge(resolveSystemProxy),
+  createBrowserSeamServer: createChatGptBrowserSeamServer,
 }
 
 const AUTOMATIC_RESTART_LIMIT = 3
@@ -124,8 +132,17 @@ export class ElectronServerRuntime {
   private readonly resolveSystemProxy?: (url: string) => Promise<string>
   private readonly localAccessToken = randomBytes(32).toString('base64url')
   private readonly petAccessToken = randomBytes(32).toString('base64url')
+  /**
+   * Dedicated browser-seam credential (M5-PRE-001D §4/§5). Generated once per
+   * Electron runtime, handed to the server through the sidecar environment, and
+   * never persisted, logged or returned in a response. It authenticates the
+   * transport only — it is not a business approval.
+   */
+  private readonly browserSeamCredential = randomBytes(32).toString('base64url')
   private sidecarEnvPromise: Promise<NodeJS.ProcessEnv> | null = null
   private systemProxyBridge: SystemProxyBridgeLike | null = null
+  private browserSeam: BrowserSeamServer | null = null
+  private browserSeamPromise: Promise<BrowserSeamServer | null> | null = null
   private server: ActiveServer | null = null
   private adapters: SidecarChild[] = []
   private startupError: string | null = null
@@ -224,6 +241,7 @@ export class ElectronServerRuntime {
       killSidecar(this.server.child, sync)
       this.server = null
     }
+    this.stopBrowserSeam()
     this.stopSystemProxyBridge()
   }
 
@@ -268,7 +286,14 @@ export class ElectronServerRuntime {
     const url = `http://${SERVER_CONTROL_HOST}:${port}`
     const logs: string[] = []
     let startState: ServerStartState | null = null
-    const env = this.withServerAccessTokens(await this.resolveSidecarBaseEnv())
+    // Start the loopback browser seam before the server needs it, then hand the
+    // endpoint + dedicated credential to the sidecar through the existing env
+    // injection. It runs concurrently with the base environment resolution so it
+    // never reorders that sequencing. Best effort: without it the server simply
+    // has no browser capability and the Core reports UNSUPPORTED_CAPABILITY.
+    const browserSeamUrl = this.ensureBrowserSeam()
+    const baseEnv = this.withServerAccessTokens(await this.resolveSidecarBaseEnv())
+    const env = this.withBrowserSeam(baseEnv, await browserSeamUrl)
     this.assertCurrentGeneration(generation)
     const plan = createServerPlan({
       desktopRoot: this.desktopRoot,
@@ -583,6 +608,62 @@ export class ElectronServerRuntime {
     this.systemProxyBridge = null
     this.sidecarEnvPromise = null
     if (bridge) void bridge.stop()
+  }
+
+  /**
+   * Creates the browser seam listener once per Electron runtime and returns its
+   * loopback endpoint. It is intentionally long-lived across server restarts:
+   * a restarted server under the same Electron runtime receives the same current
+   * endpoint and the same credential and simply dials again (M5-PRE-001D §25).
+   */
+  private async ensureBrowserSeam(): Promise<string | null> {
+    if (this.browserSeam) return this.browserSeam.url
+    this.browserSeamPromise ??= this.startBrowserSeamOnce()
+    const seam = await this.browserSeamPromise
+    return seam === null ? null : seam.url
+  }
+
+  private async startBrowserSeamOnce(): Promise<BrowserSeamServer | null> {
+    const generation = this.lifecycleGeneration
+    try {
+      const seam = await this.deps.createBrowserSeamServer(this.browserSeamCredential)
+      if (generation !== this.lifecycleGeneration) {
+        // A stop raced this startup; never leak a listener past stopAll.
+        await seam.close().catch(() => undefined)
+        return null
+      }
+      this.browserSeam = seam
+      return seam
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      this.deps.appendHostDiagnostic(
+        this.diagnosticsFile,
+        `[browser-seam] [startup-error] ${sanitizeHostDiagnostic(message)}`,
+      )
+      return null
+    }
+  }
+
+  private withBrowserSeam(env: NodeJS.ProcessEnv, seamUrl: string | null): NodeJS.ProcessEnv {
+    // These values are owned by the Electron host. Never inherit a caller-set
+    // endpoint or credential when listener startup failed; that could route the
+    // server's bearer token to an unrelated process.
+    const safeEnv = { ...env }
+    delete safeEnv[BROWSER_SEAM_URL_ENV]
+    delete safeEnv[BROWSER_SEAM_CREDENTIAL_ENV]
+    if (seamUrl === null) return safeEnv
+    return {
+      ...safeEnv,
+      [BROWSER_SEAM_URL_ENV]: seamUrl,
+      [BROWSER_SEAM_CREDENTIAL_ENV]: this.browserSeamCredential,
+    }
+  }
+
+  private stopBrowserSeam(): void {
+    const seam = this.browserSeam
+    this.browserSeam = null
+    this.browserSeamPromise = null
+    if (seam) void seam.close()
   }
 
   // On Windows, forward the user's chosen PowerShell to the agent sidecar so its
